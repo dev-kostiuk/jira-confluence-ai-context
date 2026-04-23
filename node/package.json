@@ -1,0 +1,21 @@
+{
+  "name": "jira-context-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "jira-context-node": "src/cli.js"
+  },
+  "scripts": {
+    "sync": "node src/cli.js",
+    "sync:jira": "node src/cli.js jira",
+    "sync:confluence": "node src/cli.js confluence"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "html-to-text": "^9.0.5"
+  }
+}
