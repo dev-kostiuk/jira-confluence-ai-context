@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { Agent } from "undici";
 
 /** @param {{ email: string, apiToken: string }} settings */
 export function authHeader(settings) {
@@ -12,6 +13,27 @@ export function defaultHeaders(settings) {
     Authorization: authHeader(settings),
     Accept: "application/json",
     "Content-Type": "application/json",
+  };
+}
+
+/** @param {{ httpVerifySsl?: boolean }} settings */
+function tlsDispatcher(settings) {
+  if (settings.httpVerifySsl !== false) return {};
+  return {
+    dispatcher: new Agent({ connect: { rejectUnauthorized: false } }),
+  };
+}
+
+/**
+ * @param {Record<string, unknown>} settings
+ * @param {RequestInit} [init]
+ * @returns {RequestInit}
+ */
+export function baseFetchInit(settings, init = {}) {
+  return {
+    ...tlsDispatcher(settings),
+    ...init,
+    headers: { ...defaultHeaders(settings), ...init.headers },
   };
 }
 

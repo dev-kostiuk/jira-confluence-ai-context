@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.7",
-    "html-to-text": "^9.0.5"
+    "html-to-text": "^9.0.5",
+    "undici": "^6.21.1"
   }
 }

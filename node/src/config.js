@@ -12,9 +12,34 @@ function truthy(val) {
   return ["1", "true", "yes", "on"].includes(String(val).trim().toLowerCase());
 }
 
+function sslVerifyEnabled() {
+  const v = (process.env.HTTPX_VERIFY_SSL || "1").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(v);
+}
+
+/** @returns {2 | 3 | null} */
+function parseJiraRestApiVersion(raw) {
+  if (raw == null || !String(raw).trim()) return null;
+  const v = parseInt(String(raw).trim(), 10);
+  if (v !== 2 && v !== 3) {
+    console.error("JIRA_REST_API_VERSION must be 2 or 3 when set.");
+    process.exit(1);
+  }
+  return v;
+}
+
+/** @returns {string | null} */
+function normalizeConfluenceRestPrefix(raw) {
+  if (raw == null || !String(raw).trim()) return null;
+  let p = String(raw).trim().replace(/\/+$/, "");
+  if (!p.startsWith("/")) p = `/${p}`;
+  return p;
+}
+
 /**
  * @returns {{
  *   site: string,
+ *   jiraSite: string,
  *   email: string,
  *   apiToken: string,
  *   outputDir: string,
@@ -23,11 +48,16 @@ function truthy(val) {
  *   rawJql: string | null,
  *   confluenceSpaceKeys: string[],
  *   confluenceMaxPagesPerSpace: number,
- *   jiraPageSize: number
+ *   jiraPageSize: number,
+ *   httpVerifySsl: boolean,
+ *   jiraRestApiVersion: 2 | 3 | null,
+ *   confluenceRestPrefix: string | null,
  * }}
  */
 export function loadSettings() {
   const site = (process.env.ATLASSIAN_SITE || "").trim().replace(/\/+$/, "");
+  const jiraSiteRaw = (process.env.JIRA_SITE || "").trim().replace(/\/+$/, "");
+  const jiraSite = jiraSiteRaw || site;
   const email = (process.env.ATLASSIAN_EMAIL || "").trim();
   const apiToken = (process.env.ATLASSIAN_API_TOKEN || "").trim();
 
@@ -50,6 +80,7 @@ export function loadSettings() {
 
   return {
     site,
+    jiraSite,
     email,
     apiToken,
     outputDir,
@@ -64,6 +95,11 @@ export function loadSettings() {
     jiraPageSize: Math.min(
       100,
       Math.max(1, parseInt(process.env.JIRA_PAGE_SIZE || "100", 10) || 100)
+    ),
+    httpVerifySsl: sslVerifyEnabled(),
+    jiraRestApiVersion: parseJiraRestApiVersion(process.env.JIRA_REST_API_VERSION),
+    confluenceRestPrefix: normalizeConfluenceRestPrefix(
+      process.env.CONFLUENCE_REST_PREFIX
     ),
   };
 }

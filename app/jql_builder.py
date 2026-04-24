@@ -9,16 +9,37 @@ from app.config import Settings
 from app.http_util import raise_for_status
 
 
-def _field_clauses_for_current_user(field: dict[str, Any]) -> list[str]:
+def _jql_field_reference(field: dict[str, Any]) -> str | None:
+    """Stable JQL reference: cf[n] for customfield_n; else id or quoted name."""
+    fid = field.get("id")
+    if isinstance(fid, str) and fid.startswith("customfield_"):
+        suffix = fid[len("customfield_") :]
+        if suffix.isdigit():
+            return f"cf[{suffix}]"
+    if isinstance(fid, str) and fid and " " not in fid:
+        return fid
+    name = field.get("name")
+    if name:
+        return json.dumps(str(name))
+    return None
+
+
+def _field_clauses_for_current_user(
+    field: dict[str, Any], api_major: int
+) -> list[str]:
     """Build JQL fragments for fields where currentUser() is meaningful."""
     if not field.get("searchable", False):
         return []
 
-    name = field.get("name") or field.get("id")
-    if not name:
+    fid = field.get("id")
+    # Data Center REST often marks fields "searchable" that JQL still rejects (sort-only
+    # cf[], internal ids like archivedby). Cloud-style OR-of-all-user-fields is unsafe.
+    if api_major == 2:
         return []
-    # JQL uses quoted display names for custom fields
-    quoted = json.dumps(str(name))
+
+    quoted = _jql_field_reference(field)
+    if not quoted:
+        return []
 
     schema = field.get("schema") or {}
     ftype = schema.get("type")
@@ -34,10 +55,12 @@ def _field_clauses_for_current_user(field: dict[str, Any]) -> list[str]:
     return []
 
 
-def build_jql_fragments(http: httpx.Client, settings: Settings) -> list[str]:
-    url = f"{settings.site}/rest/api/3/field"
+def build_jql_fragments(
+    http: httpx.Client, settings: Settings, api_major: int
+) -> list[str]:
+    url = f"{settings.jira_site}/rest/api/{api_major}/field"
     resp = http.get(url)
-    raise_for_status(resp, "Jira GET /field")
+    raise_for_status(resp, f"Jira GET /rest/api/{api_major}/field")
 
     fields: list[dict[str, Any]] = resp.json()
     clauses: list[str] = [
@@ -45,13 +68,14 @@ def build_jql_fragments(http: httpx.Client, settings: Settings) -> list[str]:
         "reporter = currentUser()",
     ]
 
-    # watcher / participant: supported on many Jira Cloud sites (may fail on some plans)
-    clauses.append("watcher = currentUser()")
-    clauses.append("participant in (currentUser())")
+    # watcher / participant: Jira Cloud / JSD; often missing on Server/Data Center
+    if api_major == 3:
+        clauses.append("watcher = currentUser()")
+        clauses.append("participant in (currentUser())")
 
     seen: set[str] = set(clauses)
     for field in fields:
-        for c in _field_clauses_for_current_user(field):
+        for c in _field_clauses_for_current_user(field, api_major):
             if c not in seen:
                 seen.add(c)
                 clauses.append(c)
@@ -87,12 +111,14 @@ def _chunk_fragments(fragments: list[str], max_chars: int = 6500) -> list[list[s
     return groups
 
 
-def jira_jql_batches(settings: Settings, http: httpx.Client) -> list[str]:
+def jira_jql_batches(
+    settings: Settings, http: httpx.Client, api_major: int
+) -> list[str]:
     """One or more JQL queries; the sync layer deduplicates issue keys across batches."""
     if settings.use_raw_jql_only and settings.raw_jql:
         return [settings.raw_jql]
 
-    fragments = build_jql_fragments(http, settings)
+    fragments = build_jql_fragments(http, settings, api_major)
     merged = merge_jql_or(fragments)
     if settings.extra_jql:
         merged = f"({merged}) OR ({settings.extra_jql})"

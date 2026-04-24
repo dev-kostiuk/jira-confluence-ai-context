@@ -15,6 +15,7 @@ def auth_header(settings: Settings) -> str:
 
 def client(settings: Settings) -> httpx.Client:
     return httpx.Client(
+        verify=settings.http_verify_ssl,
         headers={
             "Authorization": auth_header(settings),
             "Accept": "application/json",

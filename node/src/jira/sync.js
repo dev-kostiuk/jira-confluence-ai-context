@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { defaultHeaders, raiseForStatus } from "../http.js";
+import { baseFetchInit, raiseForStatus } from "../http.js";
 import { adfToPlain } from "../adfToPlain.js";
-import { jiraJqlBatches } from "./jqlBuilder.js";
+import { jiraJqlBatches, resolveJiraApiMajor } from "./jqlBuilder.js";
 
 /** @param {string} s @param {number} [maxLen] */
 function safeDirSegment(s, maxLen = 64) {
@@ -62,8 +62,9 @@ function formatIssueMd(issue) {
  * @param {string} jql
  * @param {string | null} nextPageToken
  */
-async function searchPage(settings, jql, nextPageToken) {
-  const url = `${settings.site}/rest/api/3/search/jql`;
+async function searchPageV3(settings, jql, nextPageToken) {
+  const base = String(settings.jiraSite).replace(/\/+$/, "");
+  const url = `${base}/rest/api/3/search/jql`;
   const body = {
     jql,
     maxResults: settings.jiraPageSize,
@@ -71,11 +72,34 @@ async function searchPage(settings, jql, nextPageToken) {
   };
   if (nextPageToken) body.nextPageToken = nextPageToken;
   const res = await fetch(url, {
+    ...baseFetchInit(settings),
     method: "POST",
-    headers: defaultHeaders(settings),
     body: JSON.stringify(body),
   });
   await raiseForStatus(res, "Jira POST /search/jql");
+  return res.json();
+}
+
+/**
+ * @param {Record<string, unknown>} settings
+ * @param {string} jql
+ * @param {number} startAt
+ */
+async function searchPageV2(settings, jql, startAt) {
+  const base = String(settings.jiraSite).replace(/\/+$/, "");
+  const url = `${base}/rest/api/2/search`;
+  const body = {
+    jql,
+    startAt,
+    maxResults: settings.jiraPageSize,
+    fields: ["*all"],
+  };
+  const res = await fetch(url, {
+    ...baseFetchInit(settings),
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  await raiseForStatus(res, "Jira POST /rest/api/2/search");
   return res.json();
 }
 
@@ -84,7 +108,8 @@ export async function syncJira(settings) {
   const outRoot = path.join(String(settings.outputDir), "jira");
   await fs.mkdir(outRoot, { recursive: true });
 
-  const batches = await jiraJqlBatches(settings);
+  const apiMajor = await resolveJiraApiMajor(settings);
+  const batches = await jiraJqlBatches(settings, apiMajor);
   await fs.writeFile(
     path.join(outRoot, "_last_jql.txt"),
     batches.join("\n\n--- BATCH ---\n\n") + "\n",
@@ -95,38 +120,74 @@ export async function syncJira(settings) {
   let saved = 0;
 
   for (const jql of batches) {
-    let token = null;
-    for (let i = 0; i < 50000; i++) {
-      const data = await searchPage(settings, jql, token);
-      const issues = data.issues || [];
-      if (!issues.length) break;
+    if (apiMajor === 3) {
+      let token = null;
+      for (let i = 0; i < 50000; i++) {
+        const data = await searchPageV3(settings, jql, token);
+        const issues = data.issues || [];
+        if (!issues.length) break;
 
-      for (const issue of issues) {
-        const key = issue.key;
-        if (!key || seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        const fields = issue.fields || {};
-        const pkey =
-          (fields.project && fields.project.key) || "UNKNOWN";
-        const folder = path.join(outRoot, safeDirSegment(String(pkey)));
-        await fs.mkdir(folder, { recursive: true });
+        for (const issue of issues) {
+          const key = issue.key;
+          if (!key || seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          const fields = issue.fields || {};
+          const pkey =
+            (fields.project && fields.project.key) || "UNKNOWN";
+          const folder = path.join(outRoot, safeDirSegment(String(pkey)));
+          await fs.mkdir(folder, { recursive: true });
 
-        await fs.writeFile(
-          path.join(folder, `${key}.md`),
-          formatIssueMd(issue),
-          "utf8"
-        );
-        await fs.writeFile(
-          path.join(folder, `${key}.json`),
-          JSON.stringify(issue, null, 2),
-          "utf8"
-        );
-        saved += 1;
+          await fs.writeFile(
+            path.join(folder, `${key}.md`),
+            formatIssueMd(issue),
+            "utf8"
+          );
+          await fs.writeFile(
+            path.join(folder, `${key}.json`),
+            JSON.stringify(issue, null, 2),
+            "utf8"
+          );
+          saved += 1;
+        }
+
+        if (data.isLast) break;
+        token = data.nextPageToken || null;
+        if (!token) break;
       }
+    } else {
+      let startAt = 0;
+      for (let j = 0; j < 50000; j++) {
+        const data = await searchPageV2(settings, jql, startAt);
+        const issues = data.issues || [];
+        if (!issues.length) break;
 
-      if (data.isLast) break;
-      token = data.nextPageToken || null;
-      if (!token) break;
+        for (const issue of issues) {
+          const key = issue.key;
+          if (!key || seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          const fields = issue.fields || {};
+          const pkey =
+            (fields.project && fields.project.key) || "UNKNOWN";
+          const folder = path.join(outRoot, safeDirSegment(String(pkey)));
+          await fs.mkdir(folder, { recursive: true });
+
+          await fs.writeFile(
+            path.join(folder, `${key}.md`),
+            formatIssueMd(issue),
+            "utf8"
+          );
+          await fs.writeFile(
+            path.join(folder, `${key}.json`),
+            JSON.stringify(issue, null, 2),
+            "utf8"
+          );
+          saved += 1;
+        }
+
+        startAt += issues.length;
+        const total = parseInt(String(data.total ?? 0), 10) || 0;
+        if (startAt >= total) break;
+      }
     }
   }
 

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { convert } from "html-to-text";
-import { defaultHeaders, raiseForStatus } from "../http.js";
+import { baseFetchInit, raiseForStatus } from "../http.js";
 
 /** @param {string} s @param {number} [maxLen] */
 function slug(s, maxLen = 100) {
@@ -27,10 +27,35 @@ async function respectRateLimit(res) {
   await delay(Math.min(wait * 1000, 60000));
 }
 
+/**
+ * DC on a dedicated host often uses `/rest/api`; Cloud uses `/wiki/rest/api`.
+ * @param {Record<string, unknown>} settings
+ * @returns {Promise<string>}
+ */
+export async function resolveConfluenceApiBase(settings) {
+  const site = String(settings.site).replace(/\/+$/, "");
+  if (settings.confluenceRestPrefix) {
+    const base = `${site}${settings.confluenceRestPrefix}`;
+    const url = `${base}/space?start=0&limit=1`;
+    const res = await fetch(url, baseFetchInit(settings));
+    await raiseForStatus(res, "Confluence GET /space (CONFLUENCE_REST_PREFIX)");
+    return base;
+  }
+  for (const path of ["/wiki/rest/api", "/rest/api"]) {
+    const base = `${site}${path}`;
+    const res = await fetch(`${base}/space?start=0&limit=1`, baseFetchInit(settings));
+    if (res.status === 200) return base;
+  }
+  throw new Error(
+    "Confluence REST not found at .../wiki/rest/api/space or .../rest/api/space. " +
+      "Set CONFLUENCE_REST_PREFIX (e.g. /rest/api) to match your server."
+  );
+}
+
 /** @param {Record<string, unknown>} settings @param {string} url @param {string} ctx */
 async function getWithRetry(settings, url, ctx) {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await fetch(url, { headers: defaultHeaders(settings) });
+    const res = await fetch(url, baseFetchInit(settings));
     if (res.status === 429) {
       await respectRateLimit(res);
       continue;
@@ -41,14 +66,14 @@ async function getWithRetry(settings, url, ctx) {
   throw new Error(`${ctx}: too many HTTP 429 responses`);
 }
 
-/** @param {Record<string, unknown>} settings */
-async function listSpaces(settings) {
+/** @param {Record<string, unknown>} settings @param {string} apiBase */
+async function listSpaces(settings, apiBase) {
   /** @type {Record<string, unknown>[]} */
   const spaces = [];
   let start = 0;
   const limit = 100;
   for (;;) {
-    const url = `${settings.site}/wiki/rest/api/space?start=${start}&limit=${limit}&expand=description.view`;
+    const url = `${apiBase}/space?start=${start}&limit=${limit}&expand=description.view`;
     const res = await getWithRetry(settings, url, "Confluence GET /space");
     const data = await res.json();
     const batch = data.results || [];
@@ -59,24 +84,24 @@ async function listSpaces(settings) {
   return spaces;
 }
 
-/** @param {Record<string, unknown>} settings */
-async function spaceKeysToSync(settings) {
+/** @param {Record<string, unknown>} settings @param {string} apiBase */
+async function spaceKeysToSync(settings, apiBase) {
   if (settings.confluenceSpaceKeys?.length) {
     return settings.confluenceSpaceKeys.map((k) => String(k).toUpperCase());
   }
-  const spaces = await listSpaces(settings);
+  const spaces = await listSpaces(settings, apiBase);
   return spaces.map((s) => s.key).filter(Boolean).map(String);
 }
 
-/** @param {Record<string, unknown>} settings @param {string} pageId */
-async function fetchPageDetail(settings, pageId) {
-  const url = `${settings.site}/wiki/rest/api/content/${pageId}?expand=body.storage,version`;
+/** @param {Record<string, unknown>} settings @param {string} apiBase @param {string} pageId */
+async function fetchPageDetail(settings, apiBase, pageId) {
+  const url = `${apiBase}/content/${pageId}?expand=body.storage,version`;
   const res = await getWithRetry(settings, url, "Confluence GET /content/{id}");
   return res.json();
 }
 
-/** @param {Record<string, unknown>} settings @param {string} spaceKey */
-async function searchPagesInSpace(settings, spaceKey) {
+/** @param {Record<string, unknown>} settings @param {string} apiBase @param {string} spaceKey */
+async function searchPagesInSpace(settings, apiBase, spaceKey) {
   const cap = settings.confluenceMaxPagesPerSpace;
   /** @type {Record<string, unknown>[]} */
   const pages = [];
@@ -94,7 +119,7 @@ async function searchPagesInSpace(settings, spaceKey) {
       limit: String(limit),
       expand: "body.storage,version",
     });
-    const url = `${settings.site}/wiki/rest/api/content/search?${q}`;
+    const url = `${apiBase}/content/search?${q}`;
     const res = await getWithRetry(settings, url, "Confluence GET /content/search");
     const data = await res.json();
     const batch = data.results || [];
@@ -117,7 +142,8 @@ export async function syncConfluence(settings) {
   const outRoot = path.join(String(settings.outputDir), "confluence");
   await fs.mkdir(outRoot, { recursive: true });
 
-  const keys = await spaceKeysToSync(settings);
+  const apiBase = await resolveConfluenceApiBase(settings);
+  const keys = await spaceKeysToSync(settings, apiBase);
   await fs.writeFile(
     path.join(outRoot, "_spaces.txt"),
     keys.join("\n") + "\n",
@@ -130,7 +156,7 @@ export async function syncConfluence(settings) {
     await fs.mkdir(folder, { recursive: true });
     let pages;
     try {
-      pages = await searchPagesInSpace(settings, spaceKey);
+      pages = await searchPagesInSpace(settings, apiBase, spaceKey);
     } catch (e) {
       await fs.writeFile(
         path.join(folder, "_sync_error.txt"),
@@ -148,7 +174,7 @@ export async function syncConfluence(settings) {
       let htmlVal = body.value || "";
       if (pid && !htmlVal) {
         try {
-          page = await fetchPageDetail(settings, String(pid));
+          page = await fetchPageDetail(settings, apiBase, String(pid));
           body = (page.body && page.body.storage) || {};
           htmlVal = body.value || "";
         } catch {
